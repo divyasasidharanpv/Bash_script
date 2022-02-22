@@ -1,0 +1,237 @@
+#!/bin/bash
+echo "updating yum ...."
+yum update -y
+
+echo " installing yum-utils and epel-release...."
+
+yum install yum-utils epel-release -y
+
+
+
+echo "Installing nginx, starting and checking status...."
+
+yum install nginx -y
+systemctl start nginx
+systemctl status nginx
+
+
+
+echo "Opening http port 80 and reloading firewall...."
+
+firewall-cmd --permanent --zone=public --add-service=http
+firewall-cmd --reload
+echo "firewall reloaded"
+
+
+
+echo "Installing php...."
+
+sudo yum install http://rpms.remirepo.net/enterprise/remi-release-7.rpm -y
+yum --disablerepo="*" --enablerepo="remi-safe" list php[7-9][0-9].x86_64
+yum-config-manager --enable remi-php74
+yum install php php-mysqlnd php-fpm -y
+phpversion=`php --version`
+
+
+echo "php installed. php version is $phpversion"
+
+echo "Configuring php-fpm...."
+
+cd /etc/php-fpm.d/
+cp /etc/php-fpm.d/www.conf  /etc/php-fpm.d/www.conf.bak
+sed -i '/;listen.owner = nobody/ s/;listen.owner = nobody/listen.owner = nginx/' www.conf
+sed -i '/;listen.group = nobody/ s/;listen.group = nobody/listen.group = nginx/' www.conf
+sed -i '/user = apache/ s/apache/nginx/' www.conf
+sed -i '/group = apache/ s/apache/nginx/' www.conf
+sed -i '/listen = 127.0.0.1:9000/ s/127.0.0.1:9000/\/var\/run\/php-fpm\/php-fpm.sock;/' www.conf
+systemctl restart php-fpm
+
+
+echo "Installing mariadb...."
+
+sudo yum install mariadb-server -y
+sudo systemctl start mariadb.service
+sudo systemctl status mariadb.service
+
+
+
+echo "Opening port 3306 and reloading firewall...."
+
+firewall-cmd --zone=public --add-port=3306/tcp --permanent
+firewall-cmd --reload
+systemctl restart mariadb.service
+
+
+echo "my sql secure installation"
+
+
+mysql_secure_installation <<EOF
+
+y
+secret
+secret
+y
+y
+y
+y
+EOF
+
+echo "done"
+
+mysql_user=bash
+database=bash
+pass=password
+user=root
+rootpass=secret
+
+echo " Logging mysql as root... Creating database and user...."
+
+mysql -u"$user" -p"$rootpass" <<MYSQL_SCRIPT
+
+CREATE DATABASE $database;
+CREATE USER '$mysql_user'@'%' IDENTIFIED BY '$pass';
+GRANT ALL PRIVILEGES ON $database.* TO '$mysql_user'@'%';
+FLUSH PRIVILEGES;
+MYSQL_SCRIPT
+
+
+echo "Storing mysql user credentials...."
+
+vi -e ~/.my.cnf << END
+i
+[client]
+user=bash
+password=password
+.
+wq
+END
+chmod 0600 ~/.my.cnf
+
+
+
+echo "Creating a directory for site1 and adding index.html file into it...."
+mkdir -p /usr/share/nginx/site1
+vi -e /usr/share/nginx/site1/index.html << END
+i
+<html>
+  <head>
+    <title>Welcome to Site1.example.com</title>
+  </head>
+  <body>
+    <h1>Success! Site1 is working!</h1>
+  </body>
+</html>
+.
+wq
+END
+
+echo " setting ownership and permission on site1 directory.... "
+sudo chown -R nginx: /usr/share/nginx/site1/
+echo "setting permissions...."
+sudo chmod -R 755 /usr/share/nginx/site1/
+
+echo "Adding site1 configuration file under /etc/nginx/conf.d...."
+cd /etc/nginx/conf.d
+vi -e site1.conf << END
+i
+server {
+    listen       80;
+    listen       [::]:80;
+    server_name  site1.example.com;
+    access_log /var/log/nginx/site1.example.com.access.log;
+    error_log /var/log/nginx/site1.example.com.error.log;
+    root   /usr/share/nginx/site1;
+    index index.php index.html index.htm;
+    location ~ \.php$ {
+        try_files \$uri =404;
+        fastcgi_pass unix:/var/run/php-fpm/php-fpm.sock;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        include fastcgi_params;
+    }
+
+}
+.
+wq
+END
+
+
+echo "Creating a directory for site2 and adding index.html file into it...."
+mkdir -p /usr/share/nginx/site2
+vi -e /usr/share/nginx/site2/index.html << END
+i
+<html>
+  <head>
+    <title>Welcome to Site2.example.com</title>
+  </head>
+  <body>
+    <h1>Success! Site2 is working!</h1>
+  </body>
+</html>
+.
+wq
+END
+
+echo " setting ownership and permission on site2 directory ...."
+sudo chown -R nginx: /usr/share/nginx/site2/
+echo "setting permissions...."
+sudo chmod -R 755 /usr/share/nginx/site2/
+
+
+echo "Adding site2 configuration file under /etc/nginx/conf.d...."
+cd /etc/nginx/conf.d
+vi -e site2.conf << END
+i
+server {
+    listen       80;
+    listen       [::]:80;
+    server_name  site2.example.com;
+    access_log /var/log/nginx/site2.example.com.access.log;
+    error_log /var/log/nginx/site2.example.com.error.log;
+    root   /usr/share/nginx/site2;
+    index index.php index.html index.htm;
+    location ~ \.php$ {
+        try_files \$uri =404;
+        fastcgi_pass unix:/var/run/php-fpm/php-fpm.sock;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        include fastcgi_params;
+    }
+
+}
+.
+wq
+END
+
+echo "Testing nginx configuration...."
+nginx -t
+echo " Status: $?"
+echo "Reloding nginx configuration...."
+systemctl reload nginx
+echo "Sites are ready...."
+
+echo "Enabling logrotation...."
+
+
+cd /etc/logrotate.d
+vi -e nginx_custom << END
+i
+/var/log/nginx/*.log {
+daily
+rotate 1
+compress
+create 0640 nginx nginx
+postrotate
+        /bin/kill -USR1 `cat /run/nginx.pid 2>/dev/null` 2>/dev/null || true
+endscript
+
+}
+.
+wq
+END
+cd /etc/logrotate.d
+mv nginx /tmp
+
+logrotate -f /etc/logrotate.d/nginx_custom
+
+
